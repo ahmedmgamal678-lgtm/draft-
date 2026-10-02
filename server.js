@@ -1,0 +1,25 @@
+const express=require('express'), path=require('path'), fs=require('fs'), Database=require('better-sqlite3'), session=require('express-session'), multer=require('multer');
+const app=express(); const PORT=process.env.PORT||3000;
+fs.mkdirSync(path.join(__dirname,'data'),{recursive:true}); fs.mkdirSync(path.join(__dirname,'public','uploads'),{recursive:true});
+const db=new Database(path.join(__dirname,'data','store.db')); db.pragma('journal_mode=WAL');
+db.exec(`CREATE TABLE IF NOT EXISTS products(id INTEGER PRIMARY KEY AUTOINCREMENT,name TEXT NOT NULL,category TEXT,price REAL NOT NULL,image TEXT,description TEXT,stock INTEGER DEFAULT 0,created_at TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY AUTOINCREMENT,customer_name TEXT,phone TEXT,address TEXT,payment TEXT,items TEXT,total REAL,status TEXT DEFAULT 'جديد',created_at TEXT DEFAULT CURRENT_TIMESTAMP); CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY,v TEXT);`);
+const defaults={name:'DRAFT & DRIVE',phone:'',whatsapp:'',accent:'#f0b429',bg:'#080808',banner:'',socials:'[]',categories:'إكسسوارات,قطع غيار,زيوت,خوذات'}; for(const [k,v] of Object.entries(defaults)) db.prepare('INSERT OR IGNORE INTO settings(k,v) VALUES(?,?)').run(k,v);
+app.use(express.json({limit:'2mb'})); app.use(express.urlencoded({extended:true})); app.use(session({secret:process.env.SESSION_SECRET||'draft-drive-secret',resave:false,saveUninitialized:false,cookie:{httpOnly:true,sameSite:'lax'}}));
+app.use(express.static(path.join(__dirname,'public')));
+const upload=multer({dest:path.join(__dirname,'public','uploads'),limits:{fileSize:5*1024*1024}});
+const setting=(k)=>db.prepare('SELECT v FROM settings WHERE k=?').get(k)?.v??''; const settings=()=>Object.fromEntries(db.prepare('SELECT k,v FROM settings').all().map(x=>[x.k,x.v]));
+function admin(req,res,next){next()}
+app.get('/api/store',(req,res)=>res.json({settings:settings(),products:db.prepare('SELECT * FROM products ORDER BY id DESC').all()}));
+app.post('/api/orders',(req,res)=>{const {customer_name,phone,address,payment,items,total}=req.body;if(!customer_name||!phone||!address||!Array.isArray(items)||!items.length)return res.status(400).json({error:'بيانات الطلب ناقصة'});const r=db.prepare('INSERT INTO orders(customer_name,phone,address,payment,items,total) VALUES(?,?,?,?,?,?)').run(customer_name,phone,address,payment||'',JSON.stringify(items),Number(total)||0);res.json({ok:true,id:r.lastInsertRowid});});
+app.post('/api/admin/login',(req,res)=>res.json({ok:true}));
+app.post('/api/admin/logout',admin,(req,res)=>{req.session.destroy(()=>res.json({ok:true}))});
+app.get('/api/admin/orders',admin,(req,res)=>res.json(db.prepare('SELECT * FROM orders ORDER BY id DESC').all()));
+app.patch('/api/admin/orders/:id',admin,(req,res)=>{db.prepare('UPDATE orders SET status=? WHERE id=?').run(req.body.status||'مقبول',req.params.id);res.json({ok:true})});
+app.delete('/api/admin/orders/:id',admin,(req,res)=>{db.prepare('DELETE FROM orders WHERE id=?').run(req.params.id);res.json({ok:true})});
+app.post('/api/admin/products',admin,(req,res)=>{const {name,category,price,image,description,stock}=req.body;if(!name||price===undefined)return res.status(400).json({error:'الاسم والسعر مطلوبان'});const r=db.prepare('INSERT INTO products(name,category,price,image,description,stock) VALUES(?,?,?,?,?,?)').run(name,category||'',Number(price),image||'',description||'',Number(stock)||0);res.json({ok:true,id:r.lastInsertRowid})});
+app.put('/api/admin/products/:id',admin,(req,res)=>{const {name,category,price,image,description,stock}=req.body;db.prepare('UPDATE products SET name=?,category=?,price=?,image=?,description=?,stock=? WHERE id=?').run(name,category||'',Number(price),image||'',description||'',Number(stock)||0,req.params.id);res.json({ok:true})});
+app.delete('/api/admin/products/:id',admin,(req,res)=>{db.prepare('DELETE FROM products WHERE id=?').run(req.params.id);res.json({ok:true})});
+app.post('/api/admin/upload',admin,upload.single('image'),(req,res)=>{if(!req.file)return res.status(400).json({error:'لم يتم رفع صورة'});const ext=path.extname(req.file.originalname)||'.jpg';const final=req.file.filename+ext;fs.renameSync(req.file.path,path.join(path.dirname(req.file.path),final));res.json({url:'/uploads/'+final})});
+app.put('/api/admin/settings',admin,(req,res)=>{for(const [k,v] of Object.entries(req.body)){db.prepare('INSERT INTO settings(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v').run(k,typeof v==='string'?v:JSON.stringify(v))}res.json({ok:true})});
+app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
+app.listen(PORT,()=>console.log('DRAFT & DRIVE running on '+PORT));
